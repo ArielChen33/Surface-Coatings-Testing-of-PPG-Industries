@@ -1,0 +1,1422 @@
+---
+title: "Fall 2022: Final Project"
+subtitle: "Analyzing coats for PPG"
+author: "Chen, Wan Qi"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Overview
+
+This RMarkdown shows how to read in the final project data. It also shows how to calculate the derived input features and how to derive the categorical output from the continuous output. It also demonstrates how to fit a simple model (with `lm()`), save that model, and load it back into the workspace. You may find these actions helpful as you work through the project.  
+
+ 
+## Load packages
+
+This example uses the `tidyverse` suite of packages.  
+
+```{r, load_tidyverse}
+library("caret")
+library("tidyverse")
+library("yardstick")
+library("bayesplot")
+```
+
+## Read data
+
+```{r, read_final_data}
+df <- readr::read_csv("fall2022_finalproject.csv", col_names = TRUE)
+```
+
+```{r, show_data_glimpse}
+df %>% glimpse()
+```
+
+```{r, read_final_holdout_inputs}
+df_test <- readr::read_csv("fall2022_holdout_inputs.csv", col_names = TRUE)
+```
+
+```{r}
+df_test %>% glimpse
+```
+
+
+## Derived quantities
+
+One of the goals of the final project is for you to assess if Subject Matter Expert (SME) recommended features help improve model performance relative to using the as-collected "x-" and "v-" input variables. The input derived *features* are calculated for you in the code chunk below using the `mutate()` function and a glimpse of the resulting data set is displayed to the screen. This is shown to demonstrate how to calculate these derived features from the provided input variables.  
+
+```{r, df_show_derived_features}
+df <- df %>% 
+  mutate(x5 = 1 - (x1 + x2 + x3 + x4),
+         w = x2 / (x3 + x4),
+         z = (x1 + x2) / (x5 + x4),
+         t = v1 * v2) %>% 
+  glimpse()
+```
+
+```{r, df_test_show_derived_features}
+df_test <- df_test %>% 
+  mutate(x5 = 1 - (x1 + x2 + x3 + x4),
+         w = x2 / (x3 + x4),
+         z = (x1 + x2) / (x5 + x4),
+         t = v1 * v2) %>% 
+  glimpse()
+```
+
+
+##Exploration
+```{r, show_logit_transform}
+df <- df %>% 
+  mutate(y = boot::logit(output)) %>% 
+  glimpse()
+```
+
+The data have continuous inputs and a categorical input. The continuous inputs consist of two groups of variables, the "x-variables", `x1` through `x4`, and the "v-variables", `v1` through `v5`. The categorical input is `m`. The response is continuous and is named `output`.  
+```{r}
+lf <- df %>% 
+  tibble::rowid_to_column() %>% 
+  pivot_longer(c(x1, x2, x3, x4, v1, v2, v3, v4, v5, x5, w, z, t))
+
+lf %>% 
+  ggplot(mapping = aes(x = value, y = y)) + 
+  geom_point(size = 0.3) + 
+  geom_smooth(size = 0.7) + 
+              #method = lm) +
+  theme_bw() + 
+  facet_wrap(~name, scales = "free")
+```
+
+```{r}
+df %>% 
+  select(x1:v5, x5:t) %>% 
+  cor() %>% 
+  corrplot::corrplot(method = 'square', type = 'upper')
+```
+From this plot, we can see there is a relationship among z, t, and x5. And this can be used to create the formula later.
+
+
+```{r}
+df %>% 
+  ggplot(mapping = aes(x = x1 + x2 + x3 + x4, y = y)) + 
+  geom_point(size = 2) + 
+  geom_smooth(formula = y ~ x, 
+              method = lm) + 
+  theme_bw()
+```
+
+```{r}
+df %>% 
+  ggplot(mapping = aes(x = m, y = y)) + 
+  geom_boxplot()
+```
+
+
+
+## Simple model
+
+Let's fit a simple linear model for `output`. We will use a linear relationship with a single input, `x1`, for demonstration purposes. The model is fit using the formula interface below and assigned to the `mod01` object.  
+
+*Linear models*
+```{r, fit_mod01}
+mod01 <- lm( y ~ x1 + x2 + x3 + x4 + v1 + v2 + v3 + v4 + v5 + m, 
+             data = df)
+mod02 <- lm( y ~ (x1 + x2 + x3 + x4 + v1 + v2 + v3 + v4 + v5) * m, 
+             data = df)
+mod03 <- lm( y ~ (x1 + x2 + x3 + x4 + v1 + v2 + v3 + v4 + v5)^2, 
+             data = df)
+```
+
+```{r}
+mod04 <- lm( y ~ x5 + w + z + t, 
+             data = df)
+mod05 <- lm( y ~ (x5 + w + z + t) * t, 
+             data = df)
+mod06 <- lm( y ~ (x5 + w + z + t) ^ 2, 
+             data = df)
+```
+
+```{r}
+mod07 <- lm( y ~ poly(x1 + x2 + x3 + x4 + v1 + v2 + v3 + v4 + v5, 2), 
+             data = df)
+mod08 <- lm( y ~ poly(x5 + w + z + t, 2), 
+             data = df)
+mod09 <- lm( y ~ x5 * t * z,  
+             data = df)
+```
+
+```{r}
+extract_metrics <- function(mod, mod_name)
+{
+  broom::glance(mod) %>% mutate(mod_name = mod_name)
+}
+
+all_metrics <- purrr::map2_dfr(list(mod01, mod02, mod03, mod04, mod05, 
+                                    mod06, mod07, mod08, mod09),
+                               1:9,
+                               extract_metrics)
+
+all_metrics %>% 
+  select(mod_name, AIC, BIC) %>% 
+  pivot_longer(c(AIC, BIC)) %>% 
+  ggplot(mapping = aes(x = as.character(mod_name), y = value)) +
+  geom_point(size = 5) +
+  facet_wrap(~name, scales = "free_y") +
+  theme_bw()
+```
+
+```{r}
+rmse_lm_results <- 
+  tibble::tibble(
+    lm_1 = modelr::rmse(mod01, df), 
+    lm_2 = modelr::rmse(mod02, df), 
+    lm_3 = modelr::rmse(mod03, df),
+    lm_4 = modelr::rmse(mod04, df),
+    lm_5 = modelr::rmse(mod05, df),
+    lm_6 = modelr::rmse(mod06, df),
+    lm_7 = modelr::rmse(mod07, df),
+    lm_8 = modelr::rmse(mod08, df),
+    lm_9 = modelr::rmse(mod09, df)
+  )
+rmse_lm_results
+```
+```{r}
+results_lm_fit <- 
+  tibble::tibble(
+    model_name = 1:9, 
+    RMSE = c(
+      modelr::rmse(mod01, df), 
+      modelr::rmse(mod02, df), 
+      modelr::rmse(mod03, df),
+      modelr::rmse(mod04, df),
+      modelr::rmse(mod05, df),
+      modelr::rmse(mod06, df),
+      modelr::rmse(mod07, df),
+      modelr::rmse(mod08, df),
+      modelr::rmse(mod09, df)
+    )
+  )
+results_lm_fit
+```
+```{r}
+results_lm_fit %>% 
+  ggplot(mapping = aes(x = model_name, y = RMSE)) + 
+  geom_line(size = 1.2) + 
+  geom_point(size = 4) + 
+  scale_x_continuous(breaks = 1:9) + 
+  theme_bw() + 
+  theme(panel.grid.minor.x = element_blank())
+```
+
+```{r}
+results_lm_fit %>% 
+  mutate(R_squared = c(
+    modelr::rmse(mod01, df), 
+      modelr::rsquare(mod02, df), 
+      modelr::rsquare(mod03, df),
+      modelr::rsquare(mod04, df),
+      modelr::rsquare(mod05, df),
+      modelr::rsquare(mod06, df),
+      modelr::rsquare(mod07, df),
+      modelr::rsquare(mod08, df),
+      modelr::rsquare(mod09, df)
+  )) %>% 
+  arrange(desc(R_squared))
+```
+```{r}
+results_lm_fit %>% 
+  mutate(R_squared = c(
+    modelr::rsquare(mod01, df), 
+    modelr::rsquare(mod02, df), 
+    modelr::rsquare(mod03, df),
+    modelr::rsquare(mod04, df),
+    modelr::rsquare(mod05, df),
+    modelr::rsquare(mod06, df),
+    modelr::rsquare(mod07, df),
+    modelr::rsquare(mod08, df),
+    modelr::rsquare(mod09, df)
+  )) %>% 
+  ggplot(mapping = aes(x = model_name, y = R_squared)) + 
+  geom_line(size = 1.2) + 
+  geom_point(size = 4) + 
+  scale_x_continuous(breaks = 1:9) + 
+  theme_bw() + 
+  theme(panel.grid.minor.x = element_blank())
+```
+From the chart of the RMSE and the R_squared, we can found that the mod_06 and the mod_09 are both the best.(Since their RMSE is the lowest and the R_squared is the highest.) And also, from the chart of the AIC&BIC, mod_06 and mod_09 has the lowest value, so they are the better model compared to other models indeed.
+
+Visualize the coefficient summaries for mod05, mod06, mod09:
+```{r}
+coefplot::multiplot(mod05, mod06, mod09)
+```
+There are still not statistically significant in some of the coefficient in these three models. But the mod_09 seems to be relatively statistically significant than others. And in these three models, x5 is the most important input.
+
+*Bayesian Linear models*
+```{r}
+library(rstanarm)
+stan_06 <- stan_glm(y ~ (x5 + w + z + t) ^ 2,
+                              data = df,
+                              family = gaussian(link = "identity"), 
+                              prior = student_t(df = 7, 0, 5), 
+                              prior_intercept = student_t(df = 7, 0, 5),
+                              cores = 2, seed = 12345)
+
+stan_09 <- stan_glm(y ~ x5*t*z,
+                              data = df,
+                              family = gaussian(link = "identity"), 
+                              prior = student_t(df = 7, 0, 5), 
+                              prior_intercept = student_t(df = 7, 0, 5),
+                              cores = 2, seed = 12345)
+```
+```{r}
+stan_06 %>% summary()
+stan_09 %>% summary()
+```
+
+*Visualize the coefficients*
+```{r}
+plot(stan_06)
+plot(stan_09)
+```
+
+*Plot the posterior distribution on the coefficients*
+```{r}
+as.data.frame(stan_09) %>% tibble::as_tibble() %>% 
+  select(names(stan_09$coefficients)) %>% 
+  tibble::rowid_to_column("post_id") %>% 
+  tidyr::gather(key = "key", value = "value", -post_id) %>% 
+  ggplot(mapping = aes(x = value)) +
+  geom_histogram(bins = 55) +
+  facet_wrap(~key, scales = "free") +
+  theme_bw() +
+  theme(axis.text.y = element_blank())
+```
+All the distribution in each coefficient look like guassian distribution.
+
+*Consider about the $sigma$*
+```{r}
+as.data.frame(stan_09) %>% tibble::as_tibble() %>% 
+  select(sigma) %>% 
+  pull() %>% 
+  quantile(c(0.05, 0.5, 0.95))
+```
+
+*Visualize the distribution on $sigma$*
+```{r}
+as.data.frame(stan_09) %>% tibble::as_tibble() %>% 
+  ggplot(mapping = aes(x = sigma)) +
+  geom_histogram(bins = 55) +
+  theme_bw()
+```
+
+```{r}
+as.data.frame(stan_09) %>% tibble::as_tibble() %>% 
+  ggplot(mapping = aes(x = sigma)) +
+  geom_histogram(bins = 55) +
+  geom_vline(xintercept = stats::sigma(mod09),
+             color = "darkorange", linetype = "dashed", size = 1.1) +
+  theme_bw()
+```
+The MLE(Maximum Likelihood Estimate) is equal to the mode.
+
+*Specify the resampling scheme and the perform metric*
+```{r}
+my_ctrl <- trainControl(method = "repeatedcv", number = 5, repeats = 3)
+
+my_metric <- "RMSE"
+```
+
+##Regression
+*Linear models*
+```{r}
+set.seed(1234)
+
+fit_lm_03 <- train(
+                  y ~ (x1 + x2 + x3 + x4 + v1 + v2 + v3 + v4 + v5)^2, 
+                  data = df,
+                  method = "lm",
+                  metric = my_metric,
+                  preProcess = c("center", "scale"),
+                  trControl = my_ctrl)
+fit_lm_05 <- train(
+                  y ~ (x5 + w + z + t) * t,
+                  data = df,
+                  method = "lm",
+                  metric = my_metric,
+                  preProcess = c("center", "scale"),
+                  trControl = my_ctrl)
+fit_lm_06 <- train(
+                  y ~ (x5 + w + z + t) ^ 2,
+                  data = df,
+                  method = "lm",
+                  metric = my_metric,
+                  preProcess = c("center", "scale"),
+                  trControl = my_ctrl)
+fit_lm_09 <- train(
+                  y ~ x5 * t * z,
+                  data = df, 
+                  method = "lm",
+                  metric = my_metric,
+                  preProcess = c("center", "scale"),
+                  trControl = my_ctrl)
+
+fit_lm_03
+fit_lm_05
+fit_lm_06
+fit_lm_09
+```
+
+*Elastic net*
+```{r}
+set.seed(1234)
+fit_glmnet_06 <- train(
+                       y ~ (x5 + w + z + t) ^ 2, 
+                       data = df,
+                       method = "glmnet",
+                       metric = my_metric,
+                       preProcess = c("center","scale"),
+                       trControl = my_ctrl
+                       )
+fit_glmnet_09 <- train(
+                       y ~ x5 * t * z, 
+                       data = df,
+                       method = "glmnet",
+                       metric = my_metric,
+                       preProcess = c("center","scale"),
+                       trControl = my_ctrl
+                       )
+fit_glmnet_06
+fit_glmnet_09
+```
+
+*Neural Network*
+```{r}
+set.seed(1234)
+fit_nnet_06 <- train(
+                       y ~ (x5 + w + z + t) ^ 2, 
+                       data = df,
+                       method = "nnet",
+                       metric = my_metric, 
+                       preProcess = c("center","scale"),
+                       trControl = my_ctrl,
+                       trace = FALSE
+                       )
+fit_nnet_09 <- train(
+                       y ~ x5 * t * z, 
+                       data = df,
+                       method = "nnet",
+                       metric = my_metric, 
+                       preProcess = c("center","scale"),
+                       trControl = my_ctrl,
+                       trace = FALSE
+                       )
+fit_nnet_06
+fit_nnet_09
+```
+
+*Random Forest*
+```{r}
+set.seed(1234)
+fit_rf_06 <- train(
+                       y ~ (x5 + w + z + t) ^ 2, 
+                       data = df,
+                       method = "rf",
+                       metric = my_metric,
+                       preProcess = c("center","scale"),
+                       trControl = my_ctrl,
+                       improtance = TRUE
+                       )
+fit_rf_09 <- train(
+                       y ~ x5 * t * z, 
+                       data = df,
+                       method = "rf",
+                       metric = my_metric,
+                       preProcess = c("center","scale"),
+                       trControl = my_ctrl,
+                       improtance = TRUE
+                       )
+fit_rf_06
+fit_rf_09
+```
+
+*Gradient boosted tree*
+```{r}
+set.seed(1234)
+fit_xgb_06 <- train(
+                       y ~ (x5 + w + z + t) ^ 2, 
+                       data = df,
+                       method = "xgbTree",
+                       metric = my_metric,
+                       preProcess = c("center","scale"),
+                       trControl = my_ctrl
+                       )
+fit_xgb_09 <- train(
+                       y ~ x5 * t * z, 
+                       data = df,
+                       method = "xgbTree",
+                       metric = my_metric,
+                       preProcess = c("center","scale"),
+                       trControl = my_ctrl
+                       )
+fit_xgb_06
+fit_xgb_09
+```
+
+*SVM*
+```{r}
+set.seed(1234)
+fit_svm_06 <- train(
+                       y ~ (x5 + w + z + t) ^ 2, 
+                       data = df,
+                       method = "svmRadial",
+                       metric = my_metric,
+                       preProcess = c("center","scale"),
+                       trControl = my_ctrl
+                       )
+fit_svm_09 <- train(
+                       y ~ x5 * t * z, 
+                       data = df,
+                       method = "svmRadial",
+                       metric = my_metric,
+                       preProcess = c("center","scale"),
+                       trControl = my_ctrl
+                       )
+fit_svm_06
+fit_svm_09
+```
+
+*MARS*
+```{r}
+set.seed(1234)
+fit_mars_06 <- train(
+                       y ~ (x5 + w + z + t) ^ 2, 
+                       data = df,
+                       method = "earth",
+                       metric = my_metric,
+                       preProcess = c("center","scale"),
+                       trControl = my_ctrl
+                       )
+fit_mars_09 <- train(
+                       y ~ x5 * t * z, 
+                       data = df,
+                       method = "earth",
+                       metric = my_metric,
+                       preProcess = c("center","scale"),
+                       trControl = my_ctrl
+                       )
+fit_mars_06
+fit_mars_09
+```
+
+
+```{r}
+results_fit_rmse <- tibble::tibble(
+  model_name = 1:16,
+  RMSE = c(modelr::rmse(fit_lm_03, df),
+           modelr::rmse(fit_lm_05, df),
+           modelr::rmse(fit_lm_06, df),
+           modelr::rmse(fit_lm_09, df),
+           modelr::rmse(fit_glmnet_06, df),
+           modelr::rmse(fit_glmnet_09, df),
+           modelr::rmse(fit_nnet_06, df),
+           modelr::rmse(fit_nnet_09, df),
+           modelr::rmse(fit_rf_06, df), 
+           modelr::rmse(fit_rf_09, df), 
+           modelr::rmse(fit_xgb_06, df), 
+           modelr::rmse(fit_xgb_09, df),
+           modelr::rmse(fit_svm_06, df), 
+           modelr::rmse(fit_svm_09, df), 
+           modelr::rmse(fit_mars_06, df), 
+           modelr::rmse(fit_mars_09, df)
+  )
+)  
+```
+```{r}
+results_fit_rmse %>% 
+  ggplot(mapping = aes(x = model_name, y = RMSE)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 4) +
+  scale_x_continuous(breaks = 1:16) +
+  theme_bw() +
+  theme(panel.grid.minor.x = element_blank())
+```
+Based on the results above, the random forest has the best performance in this case.
+
+*Regression prediction*
+```{r}
+plot(varImp(fit_rf_06))
+```
+And in the model fit_rf_06, *z* is the most important input.
+
+```{r}
+results_regression <- predict(fit_rf_06, df_test)
+results_regression
+```
+
+```{r}
+ggplot(mapping = aes(x = df_test$z, y = results_regression)) + 
+geom_point(mapping = aes())
+```
+
+
+##Classification
+Set 0.33 to be the threshold in this case.
+```{r, show_binary_outcome}
+df_binary <- df %>% 
+  mutate(outcome = ifelse(output < 0.33, 'event', 'non_event'),
+         outcome = factor(outcome, levels = c("event", "non_event"))) %>% 
+  glimpse()
+```
+
+```{r}
+glm_01 <- glm(outcome ~ x1 + x2 + x3 + x4 + v1 + v2 + v3 + v4 + v5 + m,
+              family = binomial, 
+              data = df_binary)
+glm_02 <- glm(outcome ~ (x1 + x2 + x3 + x4 + v1 + v2 + v3 + v4 + v5) * m, 
+              family = binomial, 
+              data = df_binary)
+glm_03 <- glm(outcome ~ (x1 + x2 + x3 + x4 + v1 + v2 + v3 + v4 + v5)^2, 
+              family = binomial, 
+              data = df_binary)
+glm_04 <- glm(outcome ~ x5 + w + z + t, 
+              family = binomial, 
+              data = df_binary)
+glm_05 <- glm(outcome ~ (x5 + w + z + t) * t, 
+              family = binomial, 
+              data = df_binary)
+glm_06 <- glm(outcome ~ (x5 + w + z + t) ^ 2, 
+              family = binomial, 
+              data = df_binary)
+glm_07 <- glm(outcome ~ poly(x1 + x2 + x3 + x4, 3), 
+              family = binomial, 
+              data = df_binary)
+glm_08 <- glm(outcome ~ poly(v1 + v2 + v3 + v4 + v5, 3), 
+              family = binomial, 
+              data = df_binary)
+glm_09 <- glm(outcome ~ x5 * t * z, 
+              family = binomial, 
+              data = df_binary)
+```
+
+```{r}
+extract_metrics <- function(mod, mod_name)
+{
+  broom::glance(mod) %>% mutate(mod_name = mod_name)
+}
+
+all_metrics_binary <- purrr::map2_dfr(list(glm_01, glm_02, glm_03, glm_04, 
+                                    glm_05, glm_06, glm_07, glm_08, glm_09),
+                               1:9,
+                               extract_metrics)
+
+all_metrics_binary %>% 
+  select(mod_name, AIC, BIC) %>% 
+  pivot_longer(c(AIC, BIC)) %>% 
+  ggplot(mapping = aes(x = as.character(mod_name), y = value)) +
+  geom_point(size = 5) +
+  facet_wrap(~name, scales = "free_y") +
+  theme_bw()
+```
+By the performance of AIC&BIC, I think the model_06 and the model_09 are both the best models.
+
+*Visualize the coefficients*
+I cannot decide which three is the best, so I choose 4 models to visualize instead.
+```{r}
+coefplot::multiplot(glm_04, glm_05, glm_06, glm_09)
+```
+x5 seems to be the most important input in these models.
+
+
+```{r}
+stan_04_glm <- stan_glm(outcome ~ (x5 + w + z + t) * t,
+                              data = df_binary,
+                              family = binomial, 
+                              prior = student_t(df = 7, 0, 5), 
+                              prior_intercept = student_t(df = 7, 0, 5),
+                              cores = 2, seed = 12345)
+
+stan_06_glm <- stan_glm(outcome ~ x5 + w + z + t,
+                              data = df_binary,
+                              family = binomial,  
+                              prior = student_t(df = 7, 0, 5), 
+                              prior_intercept = student_t(df = 7, 0, 5),
+                              cores = 2, seed = 12345)
+```
+
+```{r}
+stan_04_glm
+stan_06_glm
+```
+```{r}
+plot(stan_04_glm)
+plot(stan_06_glm)
+```
+
+*Specify the resampling schema and the perform metric: ROC*
+```{r}
+my_ctrl_roc <- trainControl(method = 'cv',number = 5,
+                             summaryFunction = twoClassSummary,
+                             classProbs = TRUE,
+                             savePredictions = TRUE)
+my_metric_roc <- c("ROC")
+```
+
+*Logistic regression*
+```{r}
+set.seed(1234)
+fit_glm_01 <- train(
+                  outcome ~ x1 + x2 + x3 + x4 + v1 + v2 + v3 + v4 + v5 + m, 
+                  data = df_binary,
+                  method = "glm",
+                  metric = my_metric_roc,
+                  preProcess = c("center", "scale"),
+                  trControl = my_ctrl_roc)
+fit_glm_04 <- train(
+                  outcome ~ x5 + w + z + t,
+                  data = df_binary, 
+                  method = "glm",
+                  metric = my_metric_roc,
+                  preProcess = c("center", "scale"),
+                  trControl = my_ctrl_roc)
+fit_glm_05 <- train(
+                  outcome ~ (x5 + w + z + t) * t,
+                  data = df_binary,
+                  method = "glm",
+                  metric = my_metric_roc,
+                  preProcess = c("center", "scale"),
+                  trControl = my_ctrl_roc)
+fit_glm_06 <- train(
+                  outcome ~ (x5 + w + z + t) ^ 2,
+                  data = df_binary,
+                  method = "glm",
+                  metric = my_metric_roc,
+                  preProcess = c("center", "scale"),
+                  trControl = my_ctrl_roc)
+fit_glm_01
+fit_glm_04
+fit_glm_05
+fit_glm_06
+```
+
+*Elastic net*
+```{r}
+set.seed(1234)
+
+fit_enet_binary_04 <- train(
+                  outcome ~ x5 + w + z + t, 
+                  data = df_binary,
+                  method = "glmnet",
+                  metric = my_metric_roc,
+                  preProcess = c("center", "scale"),
+                  trControl = my_ctrl_roc)
+fit_enet_binary_06 <- train(
+                  outcome ~ (x5 + w + z + t) ^ 2, 
+                  data = df_binary,
+                  method = "glmnet",
+                  metric = my_metric_roc,
+                  preProcess = c("center", "scale"),
+                  trControl = my_ctrl_roc)
+
+fit_enet_binary_04
+fit_enet_binary_06
+```
+
+*Neural network*
+```{r}
+set.seed(1234)
+
+fit_nnet_binary_04 <- 
+  train(outcome ~ x5 + w + z + t, 
+                  data = df_binary,
+                  method = "nnet",
+                  metric = my_metric_roc,
+                  preProcess = c("center", "scale"),
+                  trControl = my_ctrl_roc,
+                  trace = FALSE)
+fit_nnet_binary_06 <- 
+  train(outcome ~ (x5 + w + z + t) ^ 2, 
+                  data = df_binary,
+                  method = "nnet",
+                  metric = my_metric_roc,
+                  preProcess = c("center", "scale"),
+                  trControl = my_ctrl_roc,
+                  trace = FALSE)
+fit_nnet_binary_04
+fit_nnet_binary_06
+```
+
+*Random forest*
+```{r}
+set.seed(1234)
+fit_rf_binary_04 <- 
+  train(outcome ~ x5 + w + z + t, 
+                       data = df_binary,
+                       method = "rf",
+                       metric = my_metric_roc,
+                       preProcess = c("center","scale"),
+                       trControl = my_ctrl_roc,
+                       importance = TRUE
+                       )
+fit_rf_binary_06 <- 
+  train(outcome ~ (x5 + w + z + t) ^ 2, 
+                       data = df_binary,
+                       method = "rf",
+                       metric = my_metric_roc,
+                       preProcess = c("center","scale"),
+                       trControl = my_ctrl_roc,
+                       importance = TRUE
+                       )
+fit_rf_binary_04
+fit_rf_binary_06
+```
+
+
+*Gradient boosted tree*
+```{r}
+set.seed(1234)
+fit_xgb_binary_04 <- 
+  train(outcome ~ x5 + w + z + t, 
+                       data = df_binary,
+                       method = "xgbTree",
+                       metric = my_metric_roc,
+                       preProcess = c("center","scale"),
+                       trControl = my_ctrl_roc
+                       )
+fit_xgb_binary_06 <- 
+  train(outcome ~ (x5 + w + z + t) ^ 2, 
+                       data = df_binary,
+                       method = "xgbTree",
+                       metric = my_metric_roc,
+                       preProcess = c("center","scale"),
+                       trControl = my_ctrl_roc
+                       )
+fit_xgb_binary_04
+fit_xgb_binary_06
+```
+
+*SVM*
+```{r}
+set.seed(1234)
+fit_svm_binary_04 <- 
+  train(outcome ~ x5 + w + z + t, 
+                       data = df_binary,
+                       method = "svmRadial",
+                       metric = my_metric_roc,
+                       preProcess = c("center","scale"),
+                       trControl = my_ctrl_roc
+                       )
+fit_svm_binary_06 <- 
+  train(outcome ~ (x5 + w + z + t) ^ 2, 
+                       data = df_binary,
+                       method = "svmRadial",
+                       metric = my_metric_roc,
+                       preProcess = c("center","scale"),
+                       trControl = my_ctrl_roc
+                       )
+fit_svm_binary_04
+fit_svm_binary_06
+```
+
+*MARS*
+```{r}
+set.seed(1234)
+fit_mars_binary_04 <- 
+  train(outcome ~ x5 + w + z + t, 
+                       data = df_binary,
+                       method = "earth",
+                       metric = my_metric_roc,
+                       preProcess = c("center","scale"),
+                       trControl = my_ctrl_roc
+                       )
+fit_mars_binary_06 <- 
+  train(outcome ~ (x5 + w + z + t) ^ 2, 
+                       data = df_binary,
+                       method = "earth",
+                       metric = my_metric_roc,
+                       preProcess = c("center","scale"),
+                       trControl = my_ctrl_roc
+                       )
+fit_mars_binary_04
+fit_mars_binary_06
+```
+
+```{r}
+results_binary_roc <- 
+  resamples(list(mod_binary_01 = fit_glm_01,
+                 mod_binary_02 = fit_glm_04,
+                 mod_binary_03 = fit_glm_05,
+                 mod_binary_04 = fit_glm_06,
+                 mod_binary_05 = fit_enet_binary_04,
+                 mod_binary_06 = fit_enet_binary_06, 
+                 mod_binary_07 = fit_nnet_binary_04,
+                 mod_binary_08 = fit_nnet_binary_06, 
+                 mod_binary_09 = fit_rf_binary_04, 
+                 mod_binary_10 = fit_rf_binary_06, 
+                 mod_binary_11 = fit_xgb_binary_04,
+                 mod_binary_12 = fit_xgb_binary_06, 
+                 mod_binary_13 = fit_svm_binary_04, 
+                 mod_binary_14 = fit_svm_binary_06, 
+                 mod_binary_15 = fit_mars_binary_04, 
+                 mod_binary_16 = fit_mars_binary_06
+                 ))
+summary(results_binary_roc, metric = "ROC")
+dotplot(results_binary_roc)
+```
+
+```{r}
+compile_all_model_preds <- 
+  function(m1, m2, m3, m4, m5, m6, m7, m8, m9, m10, m11, m12, m13, m14, m15, m16){
+  purrr::map2_dfr(list(m1, m2, m3, m4, m5, m6, m7, m8, m9, m10, m11, m12, m13, m14, m15, m16),
+                  as.character(seq_along(list(
+                    m1, m2, m3, m4, m5, m6, m7, m8, m9, m10, m11, m12, m13, m14, m15, m16))),
+                  function(ll, lm){
+                    ll$pred %>% tibble::as_tibble() %>% 
+                      select(obs, event, Resample) %>% 
+                      mutate(model_name = lm)
+                  })
+}
+
+all_model_preds <- 
+  compile_all_model_preds(fit_glm_01, fit_glm_04, fit_glm_05, fit_glm_06,
+                          fit_enet_binary_04, fit_enet_binary_06, 
+                          fit_nnet_binary_04, fit_nnet_binary_06, 
+                          fit_rf_binary_04, fit_rf_binary_06, 
+                          fit_xgb_binary_04, fit_xgb_binary_06, 
+                          fit_svm_binary_04, fit_svm_binary_06, 
+                          fit_mars_binary_04, fit_mars_binary_06)
+all_model_preds
+```
+```{r}
+all_model_preds %>% 
+  group_by(model_name) %>% 
+  roc_curve(obs, event) %>% 
+  autoplot()
+```
+This chart shows that the model_10 is the best since it has the highest ROC.
+
+*Accuracy*
+```{r}
+my_ctrl_acc <- trainControl(method = 'repeatedcv', number = 10, repeats = 3)
+my_metric_acc <- c("Accuracy")
+```
+
+*Logistic regression*
+```{r}
+set.seed(1234)
+
+fit_glm_01_acc <- train(
+                  outcome ~ x1 + x2 + x3 + x4 + v1 + v2 + v3 + v4 + v5 + m, 
+                  data = df_binary,
+                  method = "glm",
+                  metric = my_metric_acc,
+                  preProcess = c("center", "scale"),
+                  trControl = my_ctrl_acc)
+fit_glm_04_acc <- train(
+                  outcome ~ x5 + w + z + t,
+                  data = df_binary, 
+                  method = "glm",
+                  metric = my_metric_acc,
+                  preProcess = c("center", "scale"),
+                  trControl = my_ctrl_acc)
+fit_glm_05_acc <- train(
+                  outcome ~ (x5 + w + z + t) * t,
+                  data = df_binary,
+                  method = "glm",
+                  metric = my_metric_acc,
+                  preProcess = c("center", "scale"),
+                  trControl = my_ctrl_acc)
+fit_glm_06_acc <- train(
+                  outcome ~ (x5 + w + z + t) ^ 2,
+                  data = df_binary,
+                  method = "glm",
+                  metric = my_metric_acc,
+                  preProcess = c("center", "scale"),
+                  trControl = my_ctrl_acc)
+
+fit_glm_01_acc
+fit_glm_04_acc
+fit_glm_05_acc
+fit_glm_06_acc
+```
+*Glmnet*
+```{r}
+set.seed(1234)
+
+fit_enet_binary_04_acc <- 
+  train(outcome ~ x5 + w + z + t, 
+                  data = df_binary,
+                  method = "glmnet",
+                  metric = my_metric_acc,
+                  preProcess = c("center", "scale"),
+                  trControl = my_ctrl_acc)
+fit_enet_binary_06_acc <- 
+  train(outcome ~ (x5 + w + z + t) ^ 2, 
+                  data = df_binary,
+                  method = "glmnet",
+                  metric = my_metric_acc,
+                  preProcess = c("center", "scale"),
+                  trControl = my_ctrl_acc)
+
+fit_enet_binary_04_acc
+fit_enet_binary_06_acc
+```
+
+*Neural network*
+```{r}
+set.seed(1234)
+
+fit_nnet_binary_04_acc <- 
+  train(outcome ~ x5 + w + z + t, 
+                  data = df_binary,
+                  method = "nnet",
+                  metric = my_metric_acc,
+                  preProcess = c("center", "scale"),
+                  trControl = my_ctrl_acc,
+                  trace = FALSE)
+fit_nnet_binary_06_acc <- 
+  train(outcome ~ (x5 + w + z + t) ^ 2, 
+                  data = df_binary,
+                  method = "nnet",
+                  metric = my_metric_acc,
+                  preProcess = c("center", "scale"),
+                  trControl = my_ctrl_acc,
+                  trace = FALSE)
+fit_nnet_binary_04_acc
+fit_nnet_binary_06_acc
+```
+
+*Random forest*
+```{r}
+set.seed(1234)
+fit_rf_binary_04_acc <- 
+  train(outcome ~ x5 + w + z + t, 
+                       data = df_binary,
+                       method = "rf",
+                       metric = my_metric_acc,
+                       preProcess = c("center","scale"),
+                       trControl = my_ctrl_acc,
+                       importance = TRUE
+                       )
+fit_rf_binary_06_acc <- 
+  train(outcome ~ (x5 + w + z + t) ^ 2, 
+                       data = df_binary,
+                       method = "rf",
+                       metric = my_metric_acc,
+                       preProcess = c("center","scale"),
+                       trControl = my_ctrl_acc,
+                       importance = TRUE
+                       )
+fit_rf_binary_04_acc
+fit_rf_binary_06_acc
+```
+
+*Gradient boosted tree*
+```{r}
+set.seed(1234)
+fit_xgb_binary_04_acc <- 
+  train(outcome ~ x5 + w + z + t, 
+                       data = df_binary,
+                       method = "xgbTree",
+                       metric = my_metric_acc,
+                       preProcess = c("center","scale"),
+                       trControl = my_ctrl_acc
+                       )
+fit_xgb_binary_06_acc <- 
+  train(outcome ~ (x5 + w + z + t) ^ 2, 
+                       data = df_binary,
+                       method = "xgbTree",
+                       metric = my_metric_acc,
+                       preProcess = c("center","scale"),
+                       trControl = my_ctrl_acc
+                       )
+fit_xgb_binary_04_acc
+fit_xgb_binary_06_acc
+```
+
+*SVM*
+```{r}
+set.seed(1234)
+fit_svm_binary_04_acc <- 
+  train(outcome ~ x5 + w + z + t, 
+                       data = df_binary,
+                       method = "svmRadial",
+                       metric = my_metric_acc,
+                       preProcess = c("center","scale"),
+                       trControl = my_ctrl_acc
+                       )
+fit_svm_binary_06_acc <- 
+  train(outcome ~ (x5 + w + z + t) ^ 2, 
+                       data = df_binary,
+                       method = "svmRadial",
+                       metric = my_metric_acc,
+                       preProcess = c("center","scale"),
+                       trControl = my_ctrl_acc
+                       )
+fit_svm_binary_04_acc
+fit_svm_binary_06_acc
+```
+
+*MARS*
+```{r}
+set.seed(1234)
+fit_mars_binary_04_acc <- 
+  train(outcome ~ x5 + w + z + t, 
+                       data = df_binary,
+                       method = "earth",
+                       metric = my_metric_acc,
+                       preProcess = c("center","scale"),
+                       trControl = my_ctrl_acc
+                       )
+fit_mars_binary_06_acc <- 
+  train(outcome ~ (x5 + w + z + t) ^ 2, 
+                       data = df_binary,
+                       method = "earth",
+                       metric = my_metric_acc,
+                       preProcess = c("center","scale"),
+                       trControl = my_ctrl_acc
+                       )
+fit_mars_binary_04_acc
+fit_mars_binary_06_acc
+```
+
+```{r}
+results_binary_acc <- 
+  resamples(list(mod_binary_01_acc = fit_glm_01_acc,
+                 mod_binary_02_acc = fit_glm_04_acc,
+                 mod_binary_03_acc = fit_glm_05_acc,
+                 mod_binary_04_acc = fit_glm_06_acc,
+                 mod_binary_05_acc = fit_enet_binary_04_acc,
+                 mod_binary_06_acc = fit_enet_binary_06_acc, 
+                 mod_binary_07_acc = fit_nnet_binary_04_acc,
+                 mod_binary_08_acc = fit_nnet_binary_06_acc, 
+                 mod_binary_09_acc = fit_rf_binary_04_acc, 
+                 mod_binary_10_acc = fit_rf_binary_06_acc, 
+                 mod_binary_11_acc = fit_xgb_binary_04_acc,
+                 mod_binary_12_acc = fit_xgb_binary_06_acc, 
+                 mod_binary_13_acc = fit_svm_binary_04_acc, 
+                 mod_binary_14_acc = fit_svm_binary_06_acc, 
+                 mod_binary_15_acc = fit_mars_binary_04_acc, 
+                 mod_binary_16_acc = fit_mars_binary_06_acc
+                 ))
+summary(results_binary_acc, metric = 'Accuracy')
+dotplot(results_binary_acc, metric = 'Accuracy')
+```
+```{r}
+as.data.frame(results_binary_acc, method = 'Accuracy') %>% 
+  pivot_longer(!c("Resample")) %>% 
+  mutate(name = forcats::fct_reorder(name, value, mean)) %>% 
+  ggplot(mapping = aes(x = name, y = value)) +
+  stat_summary(fun.data = 'mean_se',
+               fun.args = list(mult = 2),
+               size = 1.25) +
+  stat_summary(fun.data = 'mean_se',
+               fun.args = list(mult = 1),
+               color = 'red',
+               size = 1) +
+  theme_bw()
+```
+The 2 chart above also show that the model_10 is the best since its acuuracy is the highest.
+
+*Binary prediction*
+```{r}
+plot(varImp(fit_rf_binary_06_acc))
+```
+In this plot, we can find that *w* is the most important input.
+
+```{r}
+logit <- predict(fit_rf_06, df_test)
+```
+
+
+```{r}
+results_classification <- predict(fit_rf_binary_06_acc, df_test, type = "prob")
+results_classification[1]
+```
+
+```{r}
+ggplot(mapping = aes(x = df_test$w, y = results_classification$event)) + 
+geom_point(mapping = aes())
+```
+
+
+The model fitting results are summarized below with a call to the `summary()` function.  
+
+```{r, show_mod01_summary}
+fit_rf_06 %>% summary()
+fit_rf_binary_06_acc %>% summary()
+```
+
+##Optimization
+*Create the testing set*
+```{r}
+all_name <- c('x1','x2','x3','x4','v1','v2','v3','v4','v5','m','x5','w','z', 't')
+make_test_input_list <- function(var_name, top_input, all_data)
+{
+  xvar <- all_data %>% select(var_name) %>% pull()
+  
+  if (var_name %in% top_input){
+    xgrid <- seq(min(xvar), max(xvar), length.out = 200)
+  } else {
+    xgrid <- median(xvar, na.rm = TRUE)
+  }
+  
+  return(xgrid)
+}
+
+make_test_input_grid <- function(all_input_names, top_input, all_data)
+{
+  test_list <- purrr::map(all_input_names, 
+                          make_test_input_list,
+                          top_input = top_input,
+                          all_data = all_data)
+  
+  expand.grid(test_list, 
+              KEEP.OUT.ATTRS = FALSE,
+              stringsAsFactors = FALSE) %>% 
+    purrr::set_names(all_input_names)
+}
+```
+```{r}
+viz_test_1 <- make_test_input_grid(all_name,"w",df)
+viz_test_1
+```
+
+*Prediction*
+```{r}
+pred_rf_binary_06 <- predict(fit_rf_binary_06,viz_test_1)
+pred_rf_binary_06 %>% head()
+```
+
+```{r}
+viz_test_1 %>% mutate(pred_class = pred_rf_binary_06) %>%
+  ggplot(mapping = aes(x = w, y = pred_class)) +
+  geom_point(size = 1, color = "navy blue")
+```
+
+*Try to use another variable with the same procedure*
+*Trying 1*
+```{r}
+viz_test_2 <- make_test_input_grid(all_name,"z",df)
+viz_test_2
+```
+
+*Prediction*
+```{r}
+pred_rf_binary_06 <- predict(fit_rf_binary_06,viz_test_2)
+pred_rf_binary_06 %>% head()
+```
+```{r}
+viz_test_2 %>% mutate(pred_class = pred_rf_binary_06) %>%
+  ggplot(mapping = aes(x = z, y = pred_class)) +
+  geom_point(size = 1, color = "navy blue")
+```
+*Trying 2*
+```{r}
+viz_test_3 <- make_test_input_grid(all_name,"x5",df)
+viz_test_3
+```
+
+*Prediction*
+```{r}
+pred_rf_binary_06 <- predict(fit_rf_binary_06,viz_test_3)
+pred_rf_binary_06 %>% head()
+```
+```{r}
+viz_test_3 %>% mutate(pred_class = pred_rf_binary_06) %>%
+  ggplot(mapping = aes(x = x5, y = pred_class)) +
+  geom_point(size = 1, color = "navy blue")
+```
+
+*Trying 3*
+```{r}
+viz_test_4 <- make_test_input_grid(all_name,"t",df)
+viz_test_4
+```
+
+*Prediction*
+```{r}
+pred_rf_binary_06 <- predict(fit_rf_binary_06,viz_test_4)
+pred_rf_binary_06 %>% head()
+```
+```{r}
+viz_test_4 %>% mutate(pred_class = pred_rf_binary_06) %>%
+  ggplot(mapping = aes(x = t, y = pred_class)) +
+  geom_point(size = 1, color = "navy blue")
+```
+From those chart above, we can see that the less important variables have less impact on the results. As a result, to maximize the collision of the coats(non events in this case), we have to set w between 0~0.28, 0.375~1; x5 between 0.07~0.16, 0.19~1; t between 0~1, 2.7~10.1 from the information of visualizations above.
+
+```{r}
+all_name <- c('x1','x2','x3','x4','v1','v2','v3','v4','v5','m','x5','w','z', 't')
+make_test_input_list <- function(var_name, discrete_inputs, all_data)
+{
+  xvar <- all_data %>% select(var_name) %>% pull()
+  
+  if (var_name %in% discrete_inputs[1]){
+    xgrid <- sample(c(rep("A",50),rep("B",50),rep("C",50),rep("D",50),rep("E",50)),250)
+  } else if(var_name %in% discrete_inputs[2]){
+    xgrid <- sample(c(rep("a",125),rep("b",125)),250)
+  }
+  else {
+    xgrid <- median(xvar, na.rm = TRUE)
+  }
+  
+  return(xgrid)
+}
+
+
+make_test_input_grid <- function(all_input_names, discrete_inputs, all_data)
+{
+  test_list <- purrr::map(all_input_names, 
+                          make_test_input_list,
+                          discrete_inputs = discrete_inputs,
+                          all_data = all_data)
+  
+  expand.grid(test_list, 
+              KEEP.OUT.ATTRS = FALSE,
+              stringsAsFactors = FALSE) %>% 
+    purrr::set_names(all_input_names)
+}
+
+
+viz_test_discrete <- make_test_input_grid(all_name,c("m"),df)
+viz_test_discrete
+```
+
+```{r}
+pred_rf_a_discrete <- predict(fit_rf_binary_06,viz_test_discrete)
+pred_rf_a_discrete %>% head()
+```
+```{r}
+viz_test_discrete %>% mutate(pred_class = pred_rf_a_discrete) %>%
+  ggplot(mapping = aes(y = pred_class)) +
+  geom_bar() +
+  facet_grid(~m)
+```
+It seems like the optimization has little help to the result of the discrete group.
+
+
+
+##Bonus --> optim()
+```{r}
+info_binary <- list(theta = df_binary$output)
+```
+
+Define the Beta log-likelihood
+```{r}
+my_beta_loglik <- function(unknowns, my_info)
+{
+  # unpack the log-transformed shape parameters
+  log_a <- unknowns[1]
+  log_b <- unknowns[2]
+  
+  # back transform
+  a <- exp(log_a)
+  b <- exp(log_b)
+  
+  # calculate the log-likelihood for all observations
+  log_lik <- sum(dbeta(my_info$theta, shape1=a, shape2=b, log=TRUE))
+  
+  # account for the change of variables
+  log_lik + log_a + log_b
+}
+```
+
+```{r}
+init_guess_01 <- rep(0, 2)
+init_guess_02 <- rep(-1, 2)
+
+#Perform the optimizing by the first starting guess
+log_ab_res_01 <- optim(init_guess_01,
+                       my_beta_loglik,
+                       gr=NULL,
+                       info_binary,
+                       method="BFGS",
+                       hessian=TRUE,
+                       control=list(fnscale=-1, maxit=1252))
+
+#Perform the optimizing by the second starting guess
+log_ab_res_02 <- optim(init_guess_02,
+                       my_beta_loglik,
+                       gr=NULL,
+                       info_binary,
+                       method="BFGS",
+                       hessian=TRUE,
+                       control=list(fnscale=-1, maxit=1252))
+log_ab_res_01$par
+log_ab_res_02$par
+```
+
+```{r}
+ab_emp_bayes <- exp(log_ab_res_01$par)
+ab_emp_bayes
+```
+```{r}
+prior_for_viz <- tibble::tibble(
+  x = seq(min(info_binary$theta), max(info_binary$theta), length.out = 1001)
+) %>% 
+  mutate(beta_pdf = dbeta(x = x, shape1 = ab_emp_bayes[1], shape2 = ab_emp_bayes[2]))
+
+df_binary %>% 
+  ggplot(mapping = aes(x = info_binary$theta)) +
+  geom_histogram(binwidth = 0.05,
+                 mapping = aes(y = stat(density))) +
+  geom_line(data = prior_for_viz,
+            mapping = aes(x = x, y = beta_pdf),
+            color = "red", size = 1.15) +
+  theme_bw()
+```
+
+```{r}
+df_binary %>% 
+  ggplot(mapping = aes(x = info_binary$theta)) +
+  geom_histogram(binwidth = 0.05,
+                 mapping = aes(y = stat(density))) +
+  geom_line(data = prior_for_viz,
+            mapping = aes(x = x, y = beta_pdf,
+                          color = "Empirical Bayes prior"),
+            size = 1.15) +
+  geom_line(data = prior_for_viz %>% 
+              mutate(beta_pdf_2 = dbeta(x = x, 
+                                        shape1 = 13, 
+                                        shape2 = 8)),
+            mapping = aes(x = x, y = beta_pdf_2, 
+                          color = "provided parameters"),
+            size = 1.15) +
+  scale_color_manual("", values = c("Empirical Bayes prior" = 'red',
+                                    "provided parameters" = 'gold')) +
+  theme_bw() +
+  theme(legend.position = "top")
+```
+
+```{r}
+qbeta(c(0.05, 0.95), shape1 = ab_emp_bayes[1], shape2 = ab_emp_bayes[2])
+```
+
+```{r}
+qbeta(c(0.05, 0.95), shape1 = 13, shape2 = 8)
+```
+
+
+
+
+###Writing into CSV file
+
+```{r}
+outcome <- predict(fit_rf_binary_06_acc, df_test)
+id = rowid_to_column(df_test)$rowid
+prediction <- tibble::tibble(
+  id = id, 
+  y = logit, 
+    outcome = outcome, 
+  probability = results_classification$event
+) %>% data.frame()
+prediction %>% head()
+```
+```{r}
+readr::write_csv(prediction, "final_prediction_1.csv")
+```
+
+
